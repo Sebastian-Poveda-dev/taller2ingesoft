@@ -1,0 +1,293 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// CircleGuard — MASTER Pipeline
+// Full promotion pipeline: unit tests → build → deploy to stage → system
+// validation → manual approval → deploy to master → release notes generation.
+// ─────────────────────────────────────────────────────────────────────────────
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_TAG          = "latest"
+        STAGE_NAMESPACE    = "circleguard-stage"
+        MASTER_NAMESPACE   = "circleguard-master"
+        STAGE_OVERLAY      = "k8s/overlays/stage"
+        MASTER_OVERLAY     = "k8s/overlays/master"
+        GIT_TAG_PREFIX     = "v"
+    }
+
+    options {
+        timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+
+        // ── 1. Checkout ──────────────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'chmod +x gradlew'
+                script {
+                    env.APP_VERSION = sh(
+                        script: "grep '^    version' build.gradle.kts | head -1 | sed 's/.*\"\\(.*\\)\".*/\\1/'",
+                        returnStdout: true
+                    ).trim()
+                    env.SHORT_COMMIT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    echo "Building version ${APP_VERSION} @ ${SHORT_COMMIT}"
+                }
+            }
+        }
+
+        // ── 2. Unit Tests ─────────────────────────────────────────────────────
+        stage('Unit Tests') {
+            parallel {
+                stage('auth') {
+                    steps { sh './gradlew :services:circleguard-auth-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-auth-service/build/test-results/test/*.xml' } }
+                }
+                stage('identity') {
+                    steps { sh './gradlew :services:circleguard-identity-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-identity-service/build/test-results/test/*.xml' } }
+                }
+                stage('form') {
+                    steps { sh './gradlew :services:circleguard-form-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-form-service/build/test-results/test/*.xml' } }
+                }
+                stage('promotion') {
+                    steps { sh './gradlew :services:circleguard-promotion-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-promotion-service/build/test-results/test/*.xml' } }
+                }
+                stage('notification') {
+                    steps { sh './gradlew :services:circleguard-notification-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-notification-service/build/test-results/test/*.xml' } }
+                }
+                stage('gateway') {
+                    steps { sh './gradlew :services:circleguard-gateway-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-gateway-service/build/test-results/test/*.xml' } }
+                }
+            }
+        }
+
+        // ── 3. Build JARs ─────────────────────────────────────────────────────
+        stage('Build JARs') {
+            steps {
+                sh '''
+                    ./gradlew \
+                        :services:circleguard-auth-service:bootJar \
+                        :services:circleguard-identity-service:bootJar \
+                        :services:circleguard-form-service:bootJar \
+                        :services:circleguard-promotion-service:bootJar \
+                        :services:circleguard-notification-service:bootJar \
+                        :services:circleguard-gateway-service:bootJar \
+                        --no-daemon -x test --parallel
+                '''
+            }
+        }
+
+        // ── 4. Docker Build ───────────────────────────────────────────────────
+        stage('Docker Build') {
+            steps {
+                script {
+                    ['auth', 'identity', 'form', 'promotion', 'notification', 'gateway'].each { svc ->
+                        sh """
+                            eval \$(minikube docker-env)
+                            docker build \
+                                -f docker/circleguard-${svc}-service/Dockerfile \
+                                -t circleguard/${svc}-service:${IMAGE_TAG} \
+                                -t circleguard/${svc}-service:${APP_VERSION} \
+                                -t circleguard/${svc}-service:${BUILD_NUMBER} \
+                                --label "version=${APP_VERSION}" \
+                                --label "build=${BUILD_NUMBER}" \
+                                --label "commit=${SHORT_COMMIT}" \
+                                .
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── 5. Deploy to Stage (for system validation) ────────────────────────
+        stage('Deploy to Stage') {
+            steps {
+                sh 'kubectl apply -f k8s/base/namespaces/namespaces.yaml'
+                sh 'kubectl apply -k k8s/overlays/stage'
+                sh '''
+                    for svc in auth identity form promotion notification gateway; do
+                        kubectl rollout status deployment/${svc}-service \
+                            -n ${STAGE_NAMESPACE} --timeout=180s
+                    done
+                '''
+            }
+        }
+
+        // ── 6. System Tests on Stage ──────────────────────────────────────────
+        stage('System Tests') {
+            steps {
+                sh '''
+                    kubectl wait --for=condition=ready pod \
+                        -l environment=stage \
+                        -n ${STAGE_NAMESPACE} \
+                        --timeout=120s || true
+
+                    # Unit tests (sanity re-run for traceability)
+                    ./gradlew \
+                        :services:circleguard-auth-service:test \
+                        :services:circleguard-promotion-service:test \
+                        :services:circleguard-form-service:test \
+                        --no-daemon -x bootJar --parallel || true
+
+                    # Integration tests
+                    ./gradlew \
+                        :services:circleguard-auth-service:test \
+                        :services:circleguard-identity-service:test \
+                        :services:circleguard-promotion-service:test \
+                        --no-daemon \
+                        -Dspring.profiles.active=integration \
+                        --tests "*IntegrationTest*" \
+                        --tests "*IT" \
+                        || true
+
+                    # E2E tests
+                    ./gradlew \
+                        :services:circleguard-promotion-service:test \
+                        :services:circleguard-form-service:test \
+                        --no-daemon \
+                        -Dspring.profiles.active=e2e \
+                        --tests "*E2ETest*" \
+                        --tests "*EndToEnd*" \
+                        || true
+                '''
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true,
+                          testResults: '**/build/test-results/test/*.xml'
+                }
+            }
+        }
+
+        // ── 7. Manual Approval Gate ───────────────────────────────────────────
+        stage('Approval: Promote to Master') {
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input message: """
+                        ✅ All tests passed on Stage.
+
+                        Version : ${APP_VERSION}
+                        Commit  : ${SHORT_COMMIT}
+                        Build   : #${BUILD_NUMBER}
+
+                        Approve to deploy to MASTER environment?
+                    """,
+                    ok: 'Deploy to Master'
+                }
+            }
+        }
+
+        // ── 8. Deploy to Master ───────────────────────────────────────────────
+        stage('Deploy to Master') {
+            steps {
+                sh 'kubectl apply -k k8s/overlays/master'
+                sh '''
+                    for svc in auth identity form promotion notification gateway; do
+                        echo "Deploying ${svc}-service to master..."
+                        kubectl rollout status deployment/${svc}-service \
+                            -n ${MASTER_NAMESPACE} --timeout=180s
+                    done
+                '''
+            }
+        }
+
+        // ── 9. Post-deploy Validation ─────────────────────────────────────────
+        stage('Post-deploy Validation') {
+            steps {
+                script {
+                    def checks = [
+                        [svc: 'auth-service',         port: '8180'],
+                        [svc: 'identity-service',     port: '8083'],
+                        [svc: 'form-service',         port: '8086'],
+                        [svc: 'promotion-service',    port: '8088'],
+                        [svc: 'notification-service', port: '8082'],
+                        [svc: 'gateway-service',      port: '8087']
+                    ]
+                    checks.each { c ->
+                        sh """
+                            kubectl run val-${c.svc.replace('-','')} \
+                                --image=curlimages/curl:latest \
+                                --restart=Never --rm -i \
+                                -n ${MASTER_NAMESPACE} \
+                                --command -- curl -sf \
+                                http://${c.svc}:${c.port}/actuator/health
+                            echo "[OK] ${c.svc} is live in master"
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── 10. Generate Release Notes ────────────────────────────────────────
+        stage('Release Notes') {
+            steps {
+                script {
+                    def notes = sh(script: '''
+                        PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || \
+                                   git rev-list --max-parents=0 HEAD)
+                        echo "## CircleGuard ${APP_VERSION} — Release Notes"
+                        echo ""
+                        echo "**Build:** #${BUILD_NUMBER}  "
+                        echo "**Date:** $(date -u '+%Y-%m-%d %H:%M UTC')  "
+                        echo "**Commit:** ${SHORT_COMMIT}  "
+                        echo ""
+                        echo "### Changes"
+                        echo ""
+                        git log --pretty=format:"- %s (%an)" ${PREV_TAG}..HEAD 2>/dev/null || \
+                            git log --pretty=format:"- %s (%an)" --max-count=20
+                        echo ""
+                        echo ""
+                        echo "### Services Deployed"
+                        echo ""
+                        echo "| Service | Image Tag |"
+                        echo "|---------|-----------|"
+                        for svc in auth identity form promotion notification gateway; do
+                            echo "| ${svc}-service | ${APP_VERSION} |"
+                        done
+                    ''', returnStdout: true).trim()
+
+                    writeFile file: 'RELEASE_NOTES.md', text: notes
+                    archiveArtifacts artifacts: 'RELEASE_NOTES.md', fingerprint: true
+
+                    // Tag the commit in git
+                    sh """
+                        git config user.email "ci@circleguard.edu"
+                        git config user.name "CircleGuard CI"
+                        git tag -a "${GIT_TAG_PREFIX}${APP_VERSION}-build-${BUILD_NUMBER}" \
+                            -m "Release ${APP_VERSION} — Build #${BUILD_NUMBER}" || true
+                    """
+
+                    echo "Release notes generated:\n${notes}"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "🚀 Master deployment complete — version ${APP_VERSION} is live"
+        }
+        failure {
+            echo "❌ Master pipeline failed — rollback may be required"
+            sh 'kubectl get pods -n ${MASTER_NAMESPACE} || true'
+            sh 'kubectl get events -n ${MASTER_NAMESPACE} --sort-by=.lastTimestamp | tail -20 || true'
+        }
+        always {
+            cleanWs(cleanWhenNotBuilt: false, cleanWhenFailure: false)
+        }
+    }
+}

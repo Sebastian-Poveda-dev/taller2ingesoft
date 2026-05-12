@@ -1,0 +1,204 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// CircleGuard — DEV Pipeline
+// Builds, unit-tests, packages Docker images into minikube, and deploys to
+// the circleguard-dev namespace. No external registry required.
+// ─────────────────────────────────────────────────────────────────────────────
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_TAG     = "dev"
+        K8S_NAMESPACE = "circleguard-dev"
+        OVERLAY       = "k8s/overlays/dev"
+    }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+
+        // ── 1. Checkout ──────────────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'chmod +x gradlew'
+            }
+        }
+
+        // ── 2. Unit Tests (parallel per service) ─────────────────────────────
+        stage('Unit Tests') {
+            parallel {
+                stage('auth') {
+                    steps {
+                        sh './gradlew :services:circleguard-auth-service:test --no-daemon'
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true,
+                                  testResults: 'services/circleguard-auth-service/build/test-results/test/*.xml'
+                        }
+                    }
+                }
+                stage('identity') {
+                    steps {
+                        sh './gradlew :services:circleguard-identity-service:test --no-daemon'
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true,
+                                  testResults: 'services/circleguard-identity-service/build/test-results/test/*.xml'
+                        }
+                    }
+                }
+                stage('form') {
+                    steps {
+                        sh './gradlew :services:circleguard-form-service:test --no-daemon'
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true,
+                                  testResults: 'services/circleguard-form-service/build/test-results/test/*.xml'
+                        }
+                    }
+                }
+                stage('promotion') {
+                    steps {
+                        sh './gradlew :services:circleguard-promotion-service:test --no-daemon'
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true,
+                                  testResults: 'services/circleguard-promotion-service/build/test-results/test/*.xml'
+                        }
+                    }
+                }
+                stage('notification') {
+                    steps {
+                        sh './gradlew :services:circleguard-notification-service:test --no-daemon'
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true,
+                                  testResults: 'services/circleguard-notification-service/build/test-results/test/*.xml'
+                        }
+                    }
+                }
+                stage('gateway') {
+                    steps {
+                        sh './gradlew :services:circleguard-gateway-service:test --no-daemon'
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true,
+                                  testResults: 'services/circleguard-gateway-service/build/test-results/test/*.xml'
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── 3. Build JARs (parallel) ──────────────────────────────────────────
+        stage('Build JARs') {
+            steps {
+                sh '''
+                    ./gradlew \
+                        :services:circleguard-auth-service:bootJar \
+                        :services:circleguard-identity-service:bootJar \
+                        :services:circleguard-form-service:bootJar \
+                        :services:circleguard-promotion-service:bootJar \
+                        :services:circleguard-notification-service:bootJar \
+                        :services:circleguard-gateway-service:bootJar \
+                        --no-daemon -x test --parallel
+                '''
+            }
+        }
+
+        // ── 4. Docker Build (into minikube daemon, no push needed) ───────────
+        stage('Docker Build') {
+            steps {
+                script {
+                    def services = [
+                        [name: 'auth',         port: '8180'],
+                        [name: 'identity',     port: '8083'],
+                        [name: 'form',         port: '8086'],
+                        [name: 'promotion',    port: '8088'],
+                        [name: 'notification', port: '8082'],
+                        [name: 'gateway',      port: '8087']
+                    ]
+                    services.each { svc ->
+                        sh """
+                            eval \$(minikube docker-env)
+                            docker build \
+                                -f docker/circleguard-${svc.name}-service/Dockerfile \
+                                -t circleguard/${svc.name}-service:${IMAGE_TAG} \
+                                --label "build=${BUILD_NUMBER}" \
+                                --label "commit=${GIT_COMMIT?.take(8)}" \
+                                .
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── 5. Deploy to Dev ──────────────────────────────────────────────────
+        stage('Deploy to Dev') {
+            steps {
+                sh 'kubectl apply -f k8s/base/namespaces/namespaces.yaml'
+                sh 'kubectl apply -k k8s/overlays/dev'
+                sh '''
+                    for svc in auth identity form promotion notification gateway; do
+                        echo "Waiting for ${svc}-service..."
+                        kubectl rollout status deployment/${svc}-service \
+                            -n ${K8S_NAMESPACE} --timeout=120s || true
+                    done
+                '''
+            }
+        }
+
+        // ── 6. Smoke Test ─────────────────────────────────────────────────────
+        stage('Smoke Test') {
+            steps {
+                script {
+                    def checks = [
+                        [svc: 'auth-service',         port: '8180'],
+                        [svc: 'identity-service',     port: '8083'],
+                        [svc: 'form-service',         port: '8086'],
+                        [svc: 'promotion-service',    port: '8088'],
+                        [svc: 'notification-service', port: '8082'],
+                        [svc: 'gateway-service',      port: '8087']
+                    ]
+                    checks.each { c ->
+                        sh """
+                            kubectl wait --for=condition=available deployment/${c.svc} \
+                                -n ${K8S_NAMESPACE} --timeout=60s || true
+                            kubectl run smoke-${c.svc.replace('-','')} \
+                                --image=curlimages/curl:latest \
+                                --restart=Never --rm -i \
+                                -n ${K8S_NAMESPACE} \
+                                --command -- curl -sf \
+                                http://${c.svc}:${c.port}/actuator/health \
+                                && echo "${c.svc} health OK" \
+                                || echo "WARN: ${c.svc} not ready yet"
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Dev deployment complete — namespace: ${K8S_NAMESPACE}"
+        }
+        failure {
+            echo "❌ Dev pipeline failed — check logs above"
+            sh 'kubectl get pods -n ${K8S_NAMESPACE} || true'
+        }
+        always {
+            cleanWs(cleanWhenNotBuilt: false, cleanWhenFailure: false)
+        }
+    }
+}

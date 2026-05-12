@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: circleguard-config
+data:
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  AUTH_DB_URL:        "jdbc:postgresql://postgres:5432/circleguard_auth"
+  IDENTITY_DB_URL:    "jdbc:postgresql://postgres:5432/circleguard_identity"
+  PROMOTION_DB_URL:   "jdbc:postgresql://postgres:5432/circleguard_promotion"
+  FORM_DB_URL:        "jdbc:postgresql://postgres:5432/circleguard_form"
+
+  # ── Neo4j ─────────────────────────────────────────────────────────────────
+  NEO4J_URI:          "bolt://neo4j:7687"
+  NEO4J_USERNAME:     "neo4j"
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  REDIS_HOST:         "redis"
+  REDIS_PORT:         "6379"
+
+  # ── Kafka ─────────────────────────────────────────────────────────────────
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+
+  # ── LDAP ──────────────────────────────────────────────────────────────────
+  LDAP_URL:           "ldap://openldap:389"
+  LDAP_BASE:          "dc=circleguard,dc=edu"
+  LDAP_USERNAME:      "cn=admin,dc=circleguard,dc=edu"
+
+  # ── Service URLs (inter-service communication) ────────────────────────────
+  AUTH_API_URL:       "http://auth-service:8180"
+
+  # ── JWT / QR token config (non-secret metadata) ──────────────────────────
+  JWT_EXPIRATION:     "3600000"
+  QR_EXPIRATION:      "300"

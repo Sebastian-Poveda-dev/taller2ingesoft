@@ -1,0 +1,106 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+spec:
+  selector:
+    app: auth-service
+  ports:
+    - port: 8180
+      targetPort: 8180
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+    spec:
+      containers:
+        - name: auth-service
+          image: circleguard/auth-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8180
+          env:
+            - name: SPRING_DATASOURCE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: circleguard-config
+                  key: AUTH_DB_URL
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: circleguard-secrets
+                  key: db-username
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: circleguard-secrets
+                  key: db-password
+            - name: SPRING_LDAP_URLS
+              valueFrom:
+                configMapKeyRef:
+                  name: circleguard-config
+                  key: LDAP_URL
+            - name: SPRING_LDAP_BASE
+              valueFrom:
+                configMapKeyRef:
+                  name: circleguard-config
+                  key: LDAP_BASE
+            - name: SPRING_LDAP_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: circleguard-config
+                  key: LDAP_USERNAME
+            - name: SPRING_LDAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: circleguard-secrets
+                  key: ldap-admin-password
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: circleguard-secrets
+                  key: jwt-secret
+            - name: JWT_EXPIRATION
+              valueFrom:
+                configMapKeyRef:
+                  name: circleguard-config
+                  key: JWT_EXPIRATION
+            - name: QR_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: circleguard-secrets
+                  key: qr-secret
+            - name: QR_EXPIRATION
+              valueFrom:
+                configMapKeyRef:
+                  name: circleguard-config
+                  key: QR_EXPIRATION
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8180
+            initialDelaySeconds: 40
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8180
+            initialDelaySeconds: 60
+            periodSeconds: 15
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

@@ -1,0 +1,14 @@
+# Master: 2 replicas for high availability, full resource allocation
+- op: replace
+  path: /spec/replicas
+  value: 2
+
+- op: replace
+  path: /spec/template/spec/containers/0/resources
+  value:
+    requests:
+      memory: "512Mi"
+      cpu: "200m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"

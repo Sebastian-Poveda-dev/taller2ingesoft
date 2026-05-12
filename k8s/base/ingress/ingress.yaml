@@ -1,0 +1,61 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: circleguard-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: circleguard.local
+      http:
+        paths:
+          - path: /api/v1/auth
+            pathType: Prefix
+            backend:
+              service:
+                name: auth-service
+                port:
+                  number: 8180
+          - path: /api/v1/identities
+            pathType: Prefix
+            backend:
+              service:
+                name: identity-service
+                port:
+                  number: 8083
+          - path: /api/v1/surveys
+            pathType: Prefix
+            backend:
+              service:
+                name: form-service
+                port:
+                  number: 8086
+          - path: /api/v1/questionnaires
+            pathType: Prefix
+            backend:
+              service:
+                name: form-service
+                port:
+                  number: 8086
+          - path: /api/v1/circles
+            pathType: Prefix
+            backend:
+              service:
+                name: promotion-service
+                port:
+                  number: 8088
+          - path: /api/v1/health-status
+            pathType: Prefix
+            backend:
+              service:
+                name: promotion-service
+                port:
+                  number: 8088
+          - path: /api/v1/gate
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway-service
+                port:
+                  number: 8087

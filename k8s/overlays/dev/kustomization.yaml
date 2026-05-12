@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: circleguard-dev
+
+bases:
+  - ../../base
+
+# Tag all resources with the environment
+commonLabels:
+  environment: dev
+
+patches:
+  - path: patch-resources.yaml
+    target:
+      kind: Deployment
+
+images:
+  - name: circleguard/auth-service
+    newTag: dev
+  - name: circleguard/identity-service
+    newTag: dev
+  - name: circleguard/form-service
+    newTag: dev
+  - name: circleguard/promotion-service
+    newTag: dev
+  - name: circleguard/notification-service
+    newTag: dev
+  - name: circleguard/gateway-service
+    newTag: dev

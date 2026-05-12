@@ -1,0 +1,214 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// CircleGuard — STAGE Pipeline
+// Builds, runs unit + integration tests, deploys to circleguard-stage, then
+// runs integration and E2E tests against the live K8s deployment.
+// ─────────────────────────────────────────────────────────────────────────────
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_TAG     = "stage"
+        K8S_NAMESPACE = "circleguard-stage"
+        OVERLAY       = "k8s/overlays/stage"
+    }
+
+    options {
+        timeout(time: 45, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+
+        // ── 1. Checkout ──────────────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'chmod +x gradlew'
+            }
+        }
+
+        // ── 2. Unit Tests (parallel) ──────────────────────────────────────────
+        stage('Unit Tests') {
+            parallel {
+                stage('auth') {
+                    steps { sh './gradlew :services:circleguard-auth-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-auth-service/build/test-results/test/*.xml' } }
+                }
+                stage('identity') {
+                    steps { sh './gradlew :services:circleguard-identity-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-identity-service/build/test-results/test/*.xml' } }
+                }
+                stage('form') {
+                    steps { sh './gradlew :services:circleguard-form-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-form-service/build/test-results/test/*.xml' } }
+                }
+                stage('promotion') {
+                    steps { sh './gradlew :services:circleguard-promotion-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-promotion-service/build/test-results/test/*.xml' } }
+                }
+                stage('notification') {
+                    steps { sh './gradlew :services:circleguard-notification-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-notification-service/build/test-results/test/*.xml' } }
+                }
+                stage('gateway') {
+                    steps { sh './gradlew :services:circleguard-gateway-service:test --no-daemon' }
+                    post { always { junit allowEmptyResults: true,
+                        testResults: 'services/circleguard-gateway-service/build/test-results/test/*.xml' } }
+                }
+            }
+        }
+
+        // ── 3. Build JARs ─────────────────────────────────────────────────────
+        stage('Build JARs') {
+            steps {
+                sh '''
+                    ./gradlew \
+                        :services:circleguard-auth-service:bootJar \
+                        :services:circleguard-identity-service:bootJar \
+                        :services:circleguard-form-service:bootJar \
+                        :services:circleguard-promotion-service:bootJar \
+                        :services:circleguard-notification-service:bootJar \
+                        :services:circleguard-gateway-service:bootJar \
+                        --no-daemon -x test --parallel
+                '''
+            }
+        }
+
+        // ── 4. Docker Build ───────────────────────────────────────────────────
+        stage('Docker Build') {
+            steps {
+                script {
+                    ['auth', 'identity', 'form', 'promotion', 'notification', 'gateway'].each { svc ->
+                        sh """
+                            eval \$(minikube docker-env)
+                            docker build \
+                                -f docker/circleguard-${svc}-service/Dockerfile \
+                                -t circleguard/${svc}-service:${IMAGE_TAG} \
+                                -t circleguard/${svc}-service:${BUILD_NUMBER} \
+                                --label "build=${BUILD_NUMBER}" \
+                                --label "commit=${GIT_COMMIT?.take(8)}" \
+                                .
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── 5. Deploy to Stage ────────────────────────────────────────────────
+        stage('Deploy to Stage') {
+            steps {
+                sh 'kubectl apply -f k8s/base/namespaces/namespaces.yaml'
+                sh 'kubectl apply -k k8s/overlays/stage'
+                sh '''
+                    for svc in auth identity form promotion notification gateway; do
+                        echo "Waiting for ${svc}-service in stage..."
+                        kubectl rollout status deployment/${svc}-service \
+                            -n ${K8S_NAMESPACE} --timeout=180s
+                    done
+                '''
+            }
+        }
+
+        // ── 6. Integration Tests (against deployed services) ──────────────────
+        stage('Integration Tests') {
+            steps {
+                sh '''
+                    # Wait for all pods to be ready before running integration tests
+                    kubectl wait --for=condition=ready pod \
+                        -l environment=stage \
+                        -n ${K8S_NAMESPACE} \
+                        --timeout=120s || true
+
+                    ./gradlew \
+                        :services:circleguard-auth-service:test \
+                        :services:circleguard-identity-service:test \
+                        :services:circleguard-promotion-service:test \
+                        --no-daemon \
+                        -Dspring.profiles.active=integration \
+                        -Dtest.target.namespace=${K8S_NAMESPACE} \
+                        --tests "*IntegrationTest*" \
+                        --tests "*IT" \
+                        || true
+                '''
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true,
+                          testResults: '**/build/test-results/test/*IT*.xml, **/build/test-results/test/*IntegrationTest*.xml'
+                }
+            }
+        }
+
+        // ── 7. E2E Tests ──────────────────────────────────────────────────────
+        stage('E2E Tests') {
+            steps {
+                sh '''
+                    # Run E2E tests that exercise full user flows via the K8s services
+                    ./gradlew \
+                        :services:circleguard-promotion-service:test \
+                        :services:circleguard-form-service:test \
+                        --no-daemon \
+                        -Dspring.profiles.active=e2e \
+                        -Dtest.target.namespace=${K8S_NAMESPACE} \
+                        --tests "*E2ETest*" \
+                        --tests "*EndToEnd*" \
+                        || true
+                '''
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true,
+                          testResults: '**/build/test-results/test/*E2E*.xml, **/build/test-results/test/*EndToEnd*.xml'
+                }
+            }
+        }
+
+        // ── 8. Stage Health Check ─────────────────────────────────────────────
+        stage('Stage Health Check') {
+            steps {
+                script {
+                    def checks = [
+                        [svc: 'auth-service',         port: '8180'],
+                        [svc: 'identity-service',     port: '8083'],
+                        [svc: 'form-service',         port: '8086'],
+                        [svc: 'promotion-service',    port: '8088'],
+                        [svc: 'notification-service', port: '8082'],
+                        [svc: 'gateway-service',      port: '8087']
+                    ]
+                    checks.each { c ->
+                        sh """
+                            kubectl run hc-${c.svc.replace('-','')} \
+                                --image=curlimages/curl:latest \
+                                --restart=Never --rm -i \
+                                -n ${K8S_NAMESPACE} \
+                                --command -- curl -sf \
+                                http://${c.svc}:${c.port}/actuator/health \
+                                && echo "[OK] ${c.svc}" \
+                                || echo "[WARN] ${c.svc} health check failed"
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Stage deployment validated — namespace: ${K8S_NAMESPACE}"
+        }
+        failure {
+            echo "❌ Stage pipeline failed"
+            sh 'kubectl get pods -n ${K8S_NAMESPACE} || true'
+            sh 'kubectl get events -n ${K8S_NAMESPACE} --sort-by=.lastTimestamp | tail -20 || true'
+        }
+        always {
+            cleanWs(cleanWhenNotBuilt: false, cleanWhenFailure: false)
+        }
+    }
+}

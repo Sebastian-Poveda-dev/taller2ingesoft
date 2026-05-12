@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Infrastructure (stateful)
+  - infra/postgres.yaml
+  - infra/neo4j.yaml
+  - infra/redis.yaml
+  - infra/zookeeper.yaml
+  - infra/kafka.yaml
+  - infra/openldap.yaml
+
+  # Configuration
+  - config/configmap.yaml
+  - config/secrets.yaml
+
+  # Microservices
+  - apps/auth-service.yaml
+  - apps/identity-service.yaml
+  - apps/form-service.yaml
+  - apps/promotion-service.yaml
+  - apps/notification-service.yaml
+  - apps/gateway-service.yaml
+
+  # Ingress
+  - ingress/ingress.yaml

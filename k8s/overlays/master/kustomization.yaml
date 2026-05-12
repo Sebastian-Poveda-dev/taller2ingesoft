@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: circleguard-master
+
+bases:
+  - ../../base
+
+commonLabels:
+  environment: master
+
+patches:
+  - path: patch-resources.yaml
+    target:
+      kind: Deployment
+
+images:
+  - name: circleguard/auth-service
+    newTag: latest
+  - name: circleguard/identity-service
+    newTag: latest
+  - name: circleguard/form-service
+    newTag: latest
+  - name: circleguard/promotion-service
+    newTag: latest
+  - name: circleguard/notification-service
+    newTag: latest
+  - name: circleguard/gateway-service
+    newTag: latest
