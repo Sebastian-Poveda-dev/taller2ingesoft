@@ -16,7 +16,7 @@ pipeline {
     }
 
     options {
-        timeout(time: 60, unit: 'MINUTES')
+        timeout(time: 90, unit: 'MINUTES')   // first run downloads all Gradle deps
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '10'))
     }
@@ -36,6 +36,15 @@ pipeline {
                     ).trim()
                     echo "Branch: ${env.BRANCH_NAME} | Version: ${env.APP_VERSION} | Commit: ${env.SHORT_COMMIT}"
                 }
+            }
+        }
+
+        // ── Gradle Dependency Warmup ──────────────────────────────────────────
+        // Downloads all dependencies before parallel stages to avoid
+        // concurrent downloads causing flaky failures on first run.
+        stage('Resolve Dependencies') {
+            steps {
+                sh './gradlew dependencies --no-daemon -q 2>/dev/null || true'
             }
         }
 
@@ -255,11 +264,15 @@ Approve to finalize MASTER deployment?
     }
 
     post {
-        success { echo "✅ [${env.BRANCH_NAME}] Pipeline complete — ${env.APP_VERSION} @ ${env.SHORT_COMMIT}" }
+        success {
+            echo "✅ [${env.BRANCH_NAME ?: 'unknown'}] Pipeline complete — ${env.APP_VERSION ?: ''} @ ${env.SHORT_COMMIT ?: ''}"
+        }
         failure {
-            echo "❌ [${env.BRANCH_NAME}] Pipeline failed"
-            sh "kubectl get pods -n ${K8S_NAMESPACE} 2>/dev/null || true"
-            sh "kubectl get events -n ${K8S_NAMESPACE} --sort-by=.lastTimestamp 2>/dev/null | tail -15 || true"
+            echo "❌ [${env.BRANCH_NAME ?: 'unknown'}] Pipeline failed"
+            // Use single-quoted shell string so the variable is resolved by the shell
+            // from the environment block, not by Groovy (avoids MissingPropertyException)
+            sh 'kubectl get pods -n $K8S_NAMESPACE 2>/dev/null || true'
+            sh 'kubectl get events -n $K8S_NAMESPACE --sort-by=.lastTimestamp 2>/dev/null | tail -15 || true'
         }
         always { cleanWs(cleanWhenNotBuilt: false, cleanWhenFailure: false) }
     }
