@@ -1,0 +1,38 @@
+spring:
+  profiles:
+    active: test
+  kafka:
+    bootstrap-servers: localhost:9092
+    listener:
+      auto-startup: false
+    consumer:
+      group-id: notification-group-test
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+  mail:
+    host: localhost
+    port: 25
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
+
+management:
+  health:
+    mail:
+      enabled: false
+
+auth:
+  api:
+    url: http://localhost:8180
+
+jwt:
+  secret: "test-super-secret-key-for-unit-tests-minimum-32-characters-long"
+  expiration: 3600000
+
+qr:
+  secret: "test-qr-secret-key-for-unit-tests-1234567890"
+  expiration: 300
