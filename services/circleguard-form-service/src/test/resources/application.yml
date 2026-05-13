@@ -1,5 +1,5 @@
 storage:
-  upload-dir: /tmp/circleguard-uploads-test
+  upload-dir: build/test-uploads
 
 spring:
   profiles:
