@@ -13,6 +13,8 @@ pipeline {
         IMAGE_TAG      = "${env.BRANCH_NAME}"
         K8S_NAMESPACE  = "circleguard-${env.BRANCH_NAME}"
         K8S_OVERLAY    = "k8s/overlays/${env.BRANCH_NAME}"
+        DOCKER_HOST    = "unix:///var/run/docker.sock"
+        TESTCONTAINERS_RYUK_DISABLED = "true"
     }
 
     options {
@@ -44,7 +46,7 @@ pipeline {
         // concurrent downloads causing flaky failures on first run.
         stage('Resolve Dependencies') {
             steps {
-                sh './gradlew dependencies --no-daemon -q 2>/dev/null || true'
+                sh './gradlew :services:circleguard-auth-service:dependencies :services:circleguard-identity-service:dependencies :services:circleguard-form-service:dependencies :services:circleguard-promotion-service:dependencies :services:circleguard-notification-service:dependencies :services:circleguard-gateway-service:dependencies --no-daemon -q 2>/dev/null || true'
             }
         }
 
