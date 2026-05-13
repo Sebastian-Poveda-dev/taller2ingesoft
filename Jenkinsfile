@@ -117,6 +117,7 @@ pipeline {
         // ── Docker Build into Minikube (all branches) ─────────────────────────
         stage('Docker Build') {
             steps {
+                sh 'minikube status | grep -q "Running" || minikube start --driver=docker'
                 script {
                     ['auth', 'identity', 'form', 'promotion', 'notification', 'gateway'].each { svc ->
                         sh """
