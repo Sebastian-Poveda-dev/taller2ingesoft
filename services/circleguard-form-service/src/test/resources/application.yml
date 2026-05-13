@@ -1,3 +1,6 @@
+storage:
+  upload-dir: /tmp/circleguard-uploads-test
+
 spring:
   profiles:
     active: test

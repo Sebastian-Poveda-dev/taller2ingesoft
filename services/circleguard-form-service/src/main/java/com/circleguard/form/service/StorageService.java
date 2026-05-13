@@ -1,5 +1,6 @@
 package com.circleguard.form.service;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -12,9 +13,10 @@ import java.util.UUID;
 @Service
 public class StorageService {
 
-    private final Path root = Paths.get("/tmp/circleguard-uploads");
+    private final Path root;
 
-    public StorageService() {
+    public StorageService(@Value("${storage.upload-dir:/tmp/circleguard-uploads}") String uploadDir) {
+        this.root = Paths.get(uploadDir);
         try {
             Files.createDirectories(root);
         } catch (IOException e) {

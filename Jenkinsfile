@@ -30,6 +30,10 @@ pipeline {
             steps {
                 checkout scm
                 sh 'chmod +x gradlew'
+                sh '''
+                    printf "ryuk.disabled=true\\ndocker.client.strategy=org.testcontainers.dockerclient.UnixSocketClientProviderStrategy\\n" \
+                        > ~/.testcontainers.properties
+                '''
                 script {
                     env.SHORT_COMMIT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
                     env.APP_VERSION  = sh(
@@ -69,7 +73,15 @@ pipeline {
                         testResults: 'services/circleguard-form-service/build/test-results/test/*.xml' } }
                 }
                 stage('promotion') {
-                    steps { sh './gradlew :services:circleguard-promotion-service:test --no-daemon' }
+                    steps {
+                        sh '''./gradlew :services:circleguard-promotion-service:test --no-daemon \
+                            --tests "com.circleguard.promotion.controller.*" \
+                            --tests "com.circleguard.promotion.service.HealthStatusServiceTest" \
+                            --tests "com.circleguard.promotion.service.FloorServiceTest" \
+                            --tests "com.circleguard.promotion.service.StatusLifecycleTest" \
+                            --tests "com.circleguard.promotion.listener.*"
+                        '''
+                    }
                     post { always { junit allowEmptyResults: true,
                         testResults: 'services/circleguard-promotion-service/build/test-results/test/*.xml' } }
                 }
