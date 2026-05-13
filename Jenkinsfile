@@ -15,6 +15,8 @@ pipeline {
         K8S_OVERLAY    = "k8s/overlays/${env.BRANCH_NAME}"
         DOCKER_HOST    = "unix:///var/run/docker.sock"
         TESTCONTAINERS_RYUK_DISABLED = "true"
+        MINIKUBE_HOME  = "/home/sebastian"
+        KUBECONFIG     = "/home/sebastian/.kube/config"
     }
 
     options {
@@ -117,7 +119,7 @@ pipeline {
         // ── Docker Build into Minikube (all branches) ─────────────────────────
         stage('Docker Build') {
             steps {
-                sh 'minikube status | grep -q "Running" || minikube start --driver=docker'
+                sh 'minikube status'
                 script {
                     ['auth', 'identity', 'form', 'promotion', 'notification', 'gateway'].each { svc ->
                         sh """
